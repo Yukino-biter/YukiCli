@@ -1,0 +1,27 @@
+# 交接文档（不提交）
+HANDOVER.md
+
+# 敏感信息
+.env
+*.key
+*.pem
+
+# 构建产物
+target/
+*.jar
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
