@@ -26,17 +26,26 @@ public class OpenAiCompatibleClient implements LlmClient {
     private final String apiKey;
     private final String apiBase;
     private final String model;
+    private final String providerName;
     private final OkHttpClient http;
 
     public OpenAiCompatibleClient(String apiKey, String apiBase, String model) {
+        this(apiKey, apiBase, model, "openai");
+    }
+
+    public OpenAiCompatibleClient(String apiKey, String apiBase, String model, String providerName) {
         this.apiKey = apiKey;
         this.apiBase = apiBase.endsWith("/") ? apiBase.substring(0, apiBase.length() - 1) : apiBase;
         this.model = model;
+        this.providerName = providerName;
         this.http = new OkHttpClient.Builder()
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(120, TimeUnit.SECONDS)
                 .build();
     }
+
+    public String getProviderName() { return providerName; }
+    public String getModelName() { return model; }
 
     @Override
     public LlmResponse chat(List<LlmMessage> messages, List<Tool> tools) {

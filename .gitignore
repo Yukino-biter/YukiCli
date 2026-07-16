@@ -10,6 +10,7 @@ HANDOVER.md
 target/
 *.jar
 *.class
+dependency-reduced-pom.xml
 
 # IDE
 .idea/
