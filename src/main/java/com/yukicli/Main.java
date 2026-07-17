@@ -44,22 +44,12 @@ public class Main {
             """;
 
     public static void main(String[] args) {
-        // 1. Windows 下切换终端代码页为 UTF-8（65001），否则 GBK 终端无法正确显示 Unicode
-        if (System.getProperty("os.name").toLowerCase().contains("win")) {
-            try {
-                new ProcessBuilder("cmd", "/c", "chcp", "65001")
-                        .redirectErrorStream(true)
-                        .start()
-                        .waitFor();
-            } catch (Exception ignored) {}
-        }
-
-        // 2. 设置 UTF-8 输出流
+        // 1. 设置 UTF-8 输出流（配合 yukicli.bat 的 chcp 65001 + -Dfile.encoding=UTF-8 使用）
         PrintStream out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
         System.setOut(out);
         System.setErr(new PrintStream(System.err, true, StandardCharsets.UTF_8));
 
-        // 3. 显示雪花图标
+        // 2. 显示雪花图标
         System.out.println("\n  " + SNOWFLAKE + "  YukiCli\n");
 
         Renderer renderer = new PlainRenderer();
