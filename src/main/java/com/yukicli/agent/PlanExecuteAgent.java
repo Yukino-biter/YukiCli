@@ -4,6 +4,7 @@ import com.yukicli.llm.LlmClient;
 import com.yukicli.llm.LlmMessage;
 import com.yukicli.llm.LlmResponse;
 import com.yukicli.llm.ToolCall;
+import com.yukicli.memory.MemoryManager;
 import com.yukicli.plan.ExecutionPlan;
 import com.yukicli.plan.Planner;
 import com.yukicli.plan.Task;
@@ -36,6 +37,7 @@ public class PlanExecuteAgent {
     private final Planner planner;
     private final Renderer renderer;
     private final PrintStream out;
+    private final MemoryManager memoryManager;
 
     /** 计划审查回调 */
     public interface PlanReviewHandler {
@@ -68,12 +70,18 @@ public class PlanExecuteAgent {
 
     public PlanExecuteAgent(LlmClient llmClient, ToolRegistry toolRegistry, Renderer renderer,
                             PlanReviewHandler reviewHandler) {
+        this(llmClient, toolRegistry, renderer, reviewHandler, new MemoryManager(llmClient));
+    }
+
+    public PlanExecuteAgent(LlmClient llmClient, ToolRegistry toolRegistry, Renderer renderer,
+                            PlanReviewHandler reviewHandler, MemoryManager memoryManager) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.renderer = renderer;
         this.out = new PrintStream(System.out, true, StandardCharsets.UTF_8);
         this.planner = new Planner(llmClient, this.out);
         this.reviewHandler = reviewHandler == null ? (goal, plan) -> PlanReviewDecision.execute() : reviewHandler;
+        this.memoryManager = memoryManager;
     }
 
     private final PlanReviewHandler reviewHandler;
@@ -82,14 +90,23 @@ public class PlanExecuteAgent {
      * 运行任务（规划 + 执行）。
      */
     public String run(String userInput) {
+        memoryManager.addUserMessage(userInput);
         try {
             ExecutionPlan plan = planner.createPlan(userInput);
-            return reviewAndExecutePlan(plan);
+            String result = reviewAndExecutePlan(plan);
+            memoryManager.addAssistantMessage("[计划结果] " + result);
+            return result;
         } catch (Exception e) {
             String msg = "执行失败: " + e.getMessage();
             renderer.error(msg);
+            memoryManager.addAssistantMessage(msg);
             return msg;
         }
+    }
+
+    /** 获取 MemoryManager 引用 */
+    public MemoryManager getMemoryManager() {
+        return memoryManager;
     }
 
     /**
@@ -321,6 +338,7 @@ public class PlanExecuteAgent {
                 renderer.toolCall(toolCall.getName(), toolCall.getArguments());
                 String result = toolRegistry.execute(toolCall.getName(), toolCall.getArguments());
                 renderer.toolResult(toolCall.getName(), result);
+                memoryManager.addToolResult(toolCall.getName(), result);
                 allResults.append(result).append("\n");
                 messages.add(LlmMessage.tool(toolCall.getId(), result));
             }
