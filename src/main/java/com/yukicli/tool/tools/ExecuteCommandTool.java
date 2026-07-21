@@ -37,6 +37,13 @@ public class ExecuteCommandTool extends AbstractTool {
         if (command == null || command.isBlank()) {
             return "[error] 缺少参数: command";
         }
+
+        // CommandGuard 快速拒绝黑名单（命中抛 PolicyException，交给 ToolRegistry 写 audit）
+        String denyReason = com.yukicli.policy.CommandGuard.check(command);
+        if (denyReason != null) {
+            throw new com.yukicli.policy.PolicyException(denyReason);
+        }
+
         try {
             // Windows 用 cmd /c，其他系统用 sh -c
             String[] cmd;
@@ -69,6 +76,8 @@ public class ExecuteCommandTool extends AbstractTool {
                 result = (result.isEmpty() ? "" : result + "\n") + "[exit code: " + exitCode + "]";
             }
             return result.isEmpty() ? "[无输出]" : result;
+        } catch (com.yukicli.policy.PolicyException e) {
+            throw e;
         } catch (Exception e) {
             return "[error] 命令执行失败: " + e.getMessage();
         }

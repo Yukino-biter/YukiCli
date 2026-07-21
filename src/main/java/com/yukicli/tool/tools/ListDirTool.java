@@ -34,7 +34,7 @@ public class ListDirTool extends AbstractTool {
     public String execute(Map<String, Object> args) {
         String pathStr = (String) args.getOrDefault("path", ".");
         try {
-            Path dir = Path.of(pathStr);
+            Path dir = resolveSafePath(pathStr);
             if (!Files.exists(dir)) {
                 return "[error] 目录不存在: " + dir;
             }
@@ -53,6 +53,8 @@ public class ListDirTool extends AbstractTool {
                 return "目录为空: " + dir;
             }
             return "目录内容 (" + dir + "):\n" + String.join("\n", entries);
+        } catch (com.yukicli.policy.PolicyException e) {
+            throw e;
         } catch (Exception e) {
             return "[error] 列出目录失败: " + e.getMessage();
         }

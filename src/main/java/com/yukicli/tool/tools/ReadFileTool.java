@@ -34,7 +34,7 @@ public class ReadFileTool extends AbstractTool {
             return "[error] 缺少参数: path";
         }
         try {
-            Path path = Path.of(pathStr);
+            Path path = resolveSafePath(pathStr);
             if (!Files.exists(path)) {
                 return "[error] 文件不存在: " + path;
             }
@@ -42,6 +42,8 @@ public class ReadFileTool extends AbstractTool {
                 return "[error] 路径是目录，不是文件: " + path;
             }
             return Files.readString(path);
+        } catch (com.yukicli.policy.PolicyException e) {
+            throw e; // 交给 ToolRegistry 统一处理
         } catch (Exception e) {
             return "[error] 读取文件失败: " + e.getMessage();
         }

@@ -4,11 +4,19 @@ import com.yukicli.agent.Agent;
 import com.yukicli.agent.AgentOrchestrator;
 import com.yukicli.agent.PlanExecuteAgent;
 import com.yukicli.config.YukiCliConfig;
+import com.yukicli.hitl.HitlHandler;
+import com.yukicli.hitl.HitlToolRegistry;
+import com.yukicli.hitl.TerminalHitlHandler;
 import com.yukicli.llm.LlmClient;
 import com.yukicli.llm.LlmClientFactory;
 import com.yukicli.llm.OpenAiCompatibleClient;
 import com.yukicli.memory.MemoryEntry;
 import com.yukicli.memory.MemoryManager;
+import com.yukicli.policy.AuditLog;
+import com.yukicli.rag.CodeIndex;
+import com.yukicli.rag.CodeRetriever;
+import com.yukicli.rag.EmbeddingClient;
+import com.yukicli.rag.VectorStore;
 import com.yukicli.render.PlainRenderer;
 import com.yukicli.render.Renderer;
 import com.yukicli.tool.ToolRegistry;
@@ -44,6 +52,7 @@ public class Main {
             3. 用中文回复用户
             4. 涉及危险操作（如删除文件）时先向用户确认
             5. 当用户明确说"记一下""记住""以后记得"时，调用 save_memory 工具保存为长期事实
+            6. 写文件和执行命令前可能需要用户审批，返回的 [HITL] 消息表示操作被拒绝或跳过
 
             可用工具：read_file / write_file / list_dir / execute_command / create_project / save_memory
             """;
@@ -74,8 +83,9 @@ public class Main {
             renderer.info("模型: " + openai.getModelName() + " (" + openai.getProviderName() + ")");
         }
 
-        // 4. 注册工具
-        ToolRegistry toolRegistry = new ToolRegistry();
+        // 4. 注册工具（使用 HitlToolRegistry 装饰，支持 HITL 审批）
+        TerminalHitlHandler hitlHandler = new TerminalHitlHandler();
+        HitlToolRegistry toolRegistry = new HitlToolRegistry(hitlHandler);
         toolRegistry.register(new ReadFileTool());
         toolRegistry.register(new WriteFileTool());
         toolRegistry.register(new ListDirTool());
@@ -83,11 +93,14 @@ public class Main {
         toolRegistry.register(new CreateProjectTool());
         SaveMemoryTool saveMemoryTool = new SaveMemoryTool();
         toolRegistry.register(saveMemoryTool);
+        SearchCodeTool searchCodeTool = new SearchCodeTool();
+        toolRegistry.register(searchCodeTool);
 
         renderer.info("已加载 " + toolRegistry.getAllTools().size() + " 个工具。");
         renderer.info("当前工作目录: " + Path.of(".").toAbsolutePath().normalize());
         renderer.info("命令：/plan 规划执行 | /team 多Agent协作 | /react 普通对话（默认）");
-        renderer.info("记忆：/memory 状态 | /save <事实> 保存 | /compact 压缩 | /clear 清空 | /exit 退出\n");
+        renderer.info("记忆：/memory 状态 | /save <事实> 保存 | /compact 压缩 | /clear 清空 | /exit 退出");
+        renderer.info("安全：/hitl 审批开关 | /audit 审计日志 | /index 索引代码（第4期）\n");
 
         // 5. 创建 Agent
         Agent reactAgent = new Agent(llmClient, toolRegistry, renderer, SYSTEM_PROMPT);
@@ -95,6 +108,25 @@ public class Main {
 
         // 把 Agent 的 MemoryManager 注入到 save_memory 工具
         saveMemoryTool.setMemorySaver(reactAgent.getMemoryManager()::storeFact);
+
+        // 注入 SearchCodeTool 的 retriever 工厂（每次调用创建新 CodeRetriever，用完即 close）
+        String projectPath = Path.of(".").toAbsolutePath().normalize().toString();
+        searchCodeTool.setProjectPath(projectPath);
+        searchCodeTool.setRetrieverFactory(pp -> {
+            try {
+                return new CodeRetriever(pp, new EmbeddingClient(config));
+            } catch (Exception e) {
+                return new CodeRetriever(pp);
+            }
+        });
+
+        // 为 Agent 注入一个共享的 CodeRetriever（用于 RAG 上下文注入）
+        try {
+            CodeRetriever sharedRetriever = new CodeRetriever(projectPath, new EmbeddingClient(config));
+            reactAgent.setCodeRetriever(sharedRetriever);
+        } catch (Exception e) {
+            // RAG 初始化失败不影响主流程
+        }
 
         // 是否下一条任务用 Multi-Agent 模式（用完即复位）
         boolean[] nextTaskUseTeamMode = {false};
@@ -135,6 +167,120 @@ public class Main {
                         renderer.info("📦 已把早期对话压缩为摘要。");
                     } else {
                         renderer.info("对话历史较短，未触发压缩。");
+                    }
+                    continue;
+                }
+
+                // === /hitl HITL 审批开关 ===
+                if (input.startsWith("/hitl")) {
+                    String arg = input.length() > 5 ? input.substring(5).trim().toLowerCase() : "";
+                    if (arg.isEmpty()) {
+                        renderer.info("HITL 审批: " + (hitlHandler.isEnabled() ? "已开启" : "已关闭"));
+                        renderer.info("用法: /hitl on 开启 | /hitl off 关闭");
+                    } else if (arg.equals("on")) {
+                        hitlHandler.setEnabled(true);
+                        hitlHandler.clearApprovedAll();
+                        renderer.info("🛡️ HITL 审批已开启（write_file / execute_command / create_project 将请求审批）");
+                    } else if (arg.equals("off")) {
+                        hitlHandler.setEnabled(false);
+                        hitlHandler.clearApprovedAll();
+                        renderer.info("HITL 审批已关闭。");
+                    } else {
+                        renderer.error("未知参数: " + arg + "（可用 on / off）");
+                    }
+                    continue;
+                }
+
+                // === /audit 审计日志 ===
+                if (input.startsWith("/audit")) {
+                    String arg = input.length() > 6 ? input.substring(6).trim() : "";
+                    int n = 20;
+                    if (!arg.isEmpty()) {
+                        try { n = Integer.parseInt(arg); } catch (NumberFormatException ignored) {}
+                    }
+                    List<AuditLog.AuditEntry> entries = toolRegistry.getAuditLog().readToday(n);
+                    if (entries.isEmpty()) {
+                        renderer.info("📭 今天暂无审计记录。");
+                    } else {
+                        System.out.println("📋 最近 " + entries.size() + " 条审计记录:");
+                        for (AuditLog.AuditEntry e : entries) {
+                            String icon = switch (e.outcome()) {
+                                case "allow" -> "✅";
+                                case "deny" -> "🛡️";
+                                case "error" -> "❌";
+                                default -> "❓";
+                            };
+                            System.out.println("  " + icon + " [" + e.timestamp() + "] " + e.tool()
+                                + " (" + e.outcome() + (e.approver().isEmpty() ? "" : "/" + e.approver()) + ")"
+                                + (e.reason().isEmpty() ? "" : " - " + e.reason())
+                                + " (" + e.durationMs() + "ms)");
+                        }
+                    }
+                    continue;
+                }
+
+                // === /index 代码索引（RAG） ===
+                if (input.startsWith("/index")) {
+                    String arg = input.length() > 6 ? input.substring(6).trim() : "";
+                    if (arg.isEmpty()) {
+                        // 默认：开始索引
+                        runIndexCommand(projectPath, renderer);
+                    } else if (arg.equals("status")) {
+                        try (CodeRetriever r = new CodeRetriever(projectPath)) {
+                            VectorStore.IndexStats stats = r.getStats();
+                            if (stats.chunkCount() == 0) {
+                                renderer.info("📭 当前项目尚未索引。运行 /index 开始索引。");
+                            } else {
+                                System.out.println("📋 索引状态:");
+                                System.out.println("  代码块: " + stats.chunkCount());
+                                System.out.println("  关系数: " + stats.relationCount());
+                                System.out.println("  索引时间: " + stats.indexedAt());
+                            }
+                        } catch (Exception e) {
+                            renderer.error("查询索引状态失败: " + e.getMessage());
+                        }
+                    } else if (arg.equals("clear")) {
+                        try (CodeRetriever r = new CodeRetriever(projectPath)) {
+                            r.clearIndex();
+                            renderer.info("🧹 已清空当前项目索引。");
+                        } catch (Exception e) {
+                            renderer.error("清空索引失败: " + e.getMessage());
+                        }
+                    } else if (arg.equals("rebuild")) {
+                        renderer.info("🔄 重建索引...");
+                        try (CodeRetriever r = new CodeRetriever(projectPath)) {
+                            r.clearIndex();
+                        }
+                        runIndexCommand(projectPath, renderer);
+                    } else {
+                        renderer.error("未知参数: " + arg + "（可用 status / clear / rebuild）");
+                    }
+                    continue;
+                }
+
+                // === /parallel 并行执行开关（第 7 期） ===
+                if (input.startsWith("/parallel")) {
+                    String arg = input.length() > 9 ? input.substring(9).trim().toLowerCase() : "";
+                    if (arg.isEmpty()) {
+                        renderer.info("并行执行: " + (toolRegistry.isParallelEnabled() ? "已开启" : "已关闭")
+                            + "（超时 " + toolRegistry.getBatchTimeoutSeconds() + "s）");
+                        renderer.info("用法: /parallel on 开启 | /parallel off 关闭 | /parallel timeout <秒数>");
+                    } else if (arg.equals("on")) {
+                        toolRegistry.setParallelEnabled(true);
+                        renderer.info("⚡ 并行执行已开启（多 tool_calls 将并行执行）");
+                    } else if (arg.equals("off")) {
+                        toolRegistry.setParallelEnabled(false);
+                        renderer.info("并行执行已关闭（多 tool_calls 将串行执行）");
+                    } else if (arg.startsWith("timeout ")) {
+                        try {
+                            long t = Long.parseLong(arg.substring(8).trim());
+                            toolRegistry.setBatchTimeoutSeconds(t);
+                            renderer.info("并行批次超时已设为 " + t + "s");
+                        } catch (NumberFormatException e) {
+                            renderer.error("无效超时值: " + arg.substring(8));
+                        }
+                    } else {
+                        renderer.error("未知参数: " + arg + "（可用 on / off / timeout <秒数>）");
                     }
                     continue;
                 }
@@ -309,6 +455,23 @@ public class Main {
             }
         } catch (Exception e) {
             renderer.error("Multi-Agent 执行出错: " + e.getMessage());
+        }
+    }
+
+    /** 运行 /index 索引命令 */
+    private static void runIndexCommand(String projectPath, Renderer renderer) {
+        renderer.info("🗂️ 开始索引项目: " + projectPath);
+        try {
+            CodeIndex indexer = new CodeIndex(msg -> System.out.println("  " + msg));
+            CodeIndex.IndexResult result = indexer.index(projectPath);
+            System.out.println();
+            if (result.chunkCount() > 0) {
+                renderer.info("✅ " + result.message());
+            } else {
+                renderer.error("❌ " + result.message());
+            }
+        } catch (Exception e) {
+            renderer.error("索引失败: " + e.getMessage());
         }
     }
 

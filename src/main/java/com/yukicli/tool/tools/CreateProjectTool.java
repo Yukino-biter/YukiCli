@@ -38,7 +38,8 @@ public class CreateProjectTool extends AbstractTool {
             return "[error] 缺少参数: name";
         }
         try {
-            Path projectRoot = Path.of(parentPath).resolve(name);
+            Path parent = resolveSafePath(parentPath);
+            Path projectRoot = parent.resolve(name).normalize();
             if (Files.exists(projectRoot)) {
                 return "[error] 目录已存在: " + projectRoot;
             }
@@ -61,6 +62,8 @@ public class CreateProjectTool extends AbstractTool {
                    "  ├── src/test/resources/\n" +
                    "  ├── README.md\n" +
                    "  └── .gitignore";
+        } catch (com.yukicli.policy.PolicyException e) {
+            throw e;
         } catch (Exception e) {
             return "[error] 创建项目失败: " + e.getMessage();
         }

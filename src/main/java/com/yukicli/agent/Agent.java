@@ -6,7 +6,11 @@ import com.yukicli.llm.LlmResponse;
 import com.yukicli.llm.ToolCall;
 import com.yukicli.memory.ConversationHistoryCompactor;
 import com.yukicli.memory.MemoryManager;
+import com.yukicli.rag.CodeRetriever;
+import com.yukicli.rag.SearchResultFormatter;
+import com.yukicli.rag.VectorStore;
 import com.yukicli.render.Renderer;
+import com.yukicli.tool.ToolExecutionResult;
 import com.yukicli.tool.ToolRegistry;
 
 import java.util.ArrayList;
@@ -42,6 +46,10 @@ public class Agent {
     private final List<LlmMessage> conversationHistory;
     private final String baseSystemPrompt;
 
+    // RAG 检索器（可选；未注入时不启用 RAG 上下文注入）
+    private CodeRetriever codeRetriever;
+    private String projectPath = System.getProperty("user.dir");
+
     public Agent(LlmClient llmClient, ToolRegistry toolRegistry, Renderer renderer, String systemPrompt) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
@@ -53,6 +61,20 @@ public class Agent {
         this.conversationHistory.add(LlmMessage.system(systemPrompt));
     }
 
+    /** 注入 RAG 检索器（启用 RAG 上下文注入） */
+    public void setCodeRetriever(CodeRetriever retriever) {
+        this.codeRetriever = retriever;
+    }
+
+    /** 设置项目根路径 */
+    public void setProjectPath(String projectPath) {
+        this.projectPath = projectPath;
+        this.memoryManager.setProjectPath(projectPath);
+        if (toolRegistry != null) {
+            toolRegistry.setProjectPath(projectPath);
+        }
+    }
+
     /**
      * 处理用户输入，运行 ReAct 循环。
      */
@@ -61,9 +83,11 @@ public class Agent {
         // 1. 写入短期记忆
         memoryManager.addUserMessage(userInput);
 
-        // 2. 检索相关长期记忆，注入到 system prompt
+        // 2. 检索相关长期记忆 + RAG 代码片段，注入到 system prompt
         String memoryContext = memoryManager.buildContextForQuery(userInput);
-        updateSystemPromptWithMemory(memoryContext);
+        String ragContext = buildRagContext(userInput);
+        String combined = joinNonBlank(memoryContext, ragContext);
+        updateSystemPromptWithMemory(combined);
 
         // 3. 用户输入加入对话历史
         conversationHistory.add(LlmMessage.user(userInput));
@@ -93,15 +117,40 @@ public class Agent {
                 renderer.assistant(response.getContent());
             }
 
-            // 执行每个工具调用
-            for (ToolCall toolCall : response.getToolCalls()) {
-                renderer.toolCall(toolCall.getName(), toolCall.getArguments());
-                String result = toolRegistry.execute(toolCall.getName(), toolCall.getArguments());
-                renderer.toolResult(toolCall.getName(), result);
+            List<ToolCall> toolCalls = response.getToolCalls();
+
+            if (toolCalls.size() == 1) {
+                // 单工具快速路径：直接执行（不走线程池）
+                ToolCall tc = toolCalls.get(0);
+                renderer.toolCall(tc.getName(), tc.getArguments());
+                String result = toolRegistry.execute(tc.getName(), tc.getArguments());
+                renderer.toolResult(tc.getName(), result);
 
                 // === Observation：工具结果回灌对话历史 + 短期记忆 ===
-                conversationHistory.add(LlmMessage.tool(toolCall.getId(), result));
-                memoryManager.addToolResult(toolCall.getName(), result);
+                conversationHistory.add(LlmMessage.tool(tc.getId(), result));
+                memoryManager.addToolResult(tc.getName(), result);
+            } else {
+                // 多工具并行执行（第 7 期）
+                // 先批量打印工具调用预告
+                for (ToolCall tc : toolCalls) {
+                    renderer.toolCall(tc.getName(), tc.getArguments());
+                }
+
+                // 构造 invocation 列表
+                List<ToolRegistry.ToolCallEntry> entries = new ArrayList<>();
+                for (ToolCall tc : toolCalls) {
+                    entries.add(new ToolRegistry.ToolCallEntry(tc.getId(), tc.getName(), tc.getArguments()));
+                }
+
+                // 并行执行（结果按原顺序返回）
+                List<ToolExecutionResult> results = toolRegistry.executeAllParallel(entries);
+
+                // 按原顺序回灌（保证 LLM 看到的 tool_result 顺序与 tool_call 一致）
+                for (ToolExecutionResult r : results) {
+                    renderer.toolResult(r.name(), r.result());
+                    conversationHistory.add(LlmMessage.tool(r.id(), r.result()));
+                    memoryManager.addToolResult(r.name(), r.result());
+                }
             }
         }
 
@@ -159,5 +208,29 @@ public class Agent {
         if (!prompt.equals(systemMsg.getContent())) {
             conversationHistory.set(0, LlmMessage.system(prompt));
         }
+    }
+
+    /** 构建 RAG 上下文：通过 CodeRetriever 混合检索 top3 代码片段 */
+    private String buildRagContext(String userInput) {
+        if (codeRetriever == null) return "";
+        try {
+            if (!codeRetriever.hasIndex()) return "";
+            List<VectorStore.SearchResult> results = codeRetriever.hybridSearch(userInput, 3);
+            if (results == null || results.isEmpty()) return "";
+            return SearchResultFormatter.formatForPrompt(results);
+        } catch (Exception e) {
+            // RAG 失败不影响主流程
+            return "";
+        }
+    }
+
+    /** 用空行连接两个非空字符串 */
+    private static String joinNonBlank(String a, String b) {
+        boolean hasA = a != null && !a.isBlank();
+        boolean hasB = b != null && !b.isBlank();
+        if (hasA && hasB) return a + "\n" + b;
+        if (hasA) return a;
+        if (hasB) return b;
+        return "";
     }
 }

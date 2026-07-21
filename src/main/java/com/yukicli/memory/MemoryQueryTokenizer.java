@@ -11,14 +11,16 @@ import java.util.Set;
  * 过滤单字符的非中文 token（标点、空白等），保留有意义的关键词用于匹配。
  *
  * 这样可以避免引入 jieba 等外部依赖，同时仍能对中英混合查询做合理的关键词匹配。
+ *
+ * 注：包外可见，便于 RAG 模块复用同套分词逻辑。
  */
-final class MemoryQueryTokenizer {
+public final class MemoryQueryTokenizer {
 
     private MemoryQueryTokenizer() {
     }
 
     /** 对查询文本进行分词，返回用于检索匹配的 token 集合。 */
-    static Set<String> tokenize(String query) {
+    public static Set<String> tokenize(String query) {
         LinkedHashSet<String> tokens = new LinkedHashSet<>();
         if (query == null || query.isBlank()) {
             return tokens;

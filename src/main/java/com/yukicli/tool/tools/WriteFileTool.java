@@ -39,12 +39,14 @@ public class WriteFileTool extends AbstractTool {
             content = "";
         }
         try {
-            Path path = Path.of(pathStr);
+            Path path = resolveSafePath(pathStr);
             if (path.getParent() != null) {
                 Files.createDirectories(path.getParent());
             }
             Files.writeString(path, content);
             return "文件写入成功: " + path + " (" + content.length() + " 字符)";
+        } catch (com.yukicli.policy.PolicyException e) {
+            throw e;
         } catch (Exception e) {
             return "[error] 写入文件失败: " + e.getMessage();
         }

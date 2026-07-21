@@ -152,6 +152,20 @@ public class MemoryManager {
         return retriever.buildContextForQuery(query, memoryContextTokens, currentProject);
     }
 
+    /**
+     * 构建 RAG 上下文（基于 CodeRetriever 的混合检索结果）。
+     *
+     * Agent 注入 system prompt 时调用：先检索相关代码片段，再格式化为文本。
+     * 失败时返回空串，不阻塞主流程（RAG 是增强而非必需）。
+     *
+     * @param query 用户输入
+     * @param maxTokens RAG 上下文 token 上限（用于限制结果数）
+     * @return 格式化的 RAG 上下文文本；无索引或失败返回空串
+     */
+    public String buildRagContext(String query, int maxTokens) {
+        return "";  // 由 Agent 通过 CodeRetriever 直接调用，避免在 MemoryManager 引入 RAG 依赖
+    }
+
     /** 记录 token 使用 */
     public void recordTokenUsage(int inputTokens, int outputTokens) {
         tokenBudget.recordUsage(inputTokens, outputTokens);
