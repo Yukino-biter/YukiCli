@@ -33,6 +33,13 @@
             <version>4.12.0</version>
         </dependency>
 
+        <!-- HTML 解析：用于 web_fetch 正文提取（第 9 期联网模块） -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.18.1</version>
+        </dependency>
+
     </dependencies>
 
     <build>

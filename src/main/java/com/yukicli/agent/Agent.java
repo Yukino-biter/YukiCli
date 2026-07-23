@@ -37,7 +37,7 @@ public class Agent {
 
     private static final int MAX_ITERATIONS = 20; // 防止无限循环
 
-    private final LlmClient llmClient;
+    private final LlmClient llmClient;  // 注：保持 final，模型切换通过重建 Agent 实现
     private final ToolRegistry toolRegistry;
     private final Renderer renderer;
     private final MemoryManager memoryManager;

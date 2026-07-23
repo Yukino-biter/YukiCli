@@ -2,12 +2,22 @@ package com.yukicli.llm;
 
 import com.yukicli.config.YukiCliConfig;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
  * LLM 客户端工厂。
- * 从 YukiCliConfig 加载配置，按 provider 创建 OpenAiCompatibleClient。
- * 支持 GLM / DeepSeek / Kimi / OpenAI 等 OpenAI 兼容接口。
+ *
+ * 第 8 期改造：用 provider 专属客户端类（GLMClient / DeepSeekClient / KimiClient / OpenAIClient）
+ * 替代原来的单一 OpenAiCompatibleClient，让每个 provider 有独立的模型能力描述和扩展点。
+ *
+ * 支持运行时切换：通过 {@link #create(String, YukiCliConfig)} 按用户指定的 provider 创建客户端，
+ * 配合 /model 命令实现运行时模型切换。
  */
 public class LlmClientFactory {
+
+    /** 支持的 provider 列表（用于 /model 命令展示） */
+    public static final List<String> SUPPORTED_PROVIDERS = List.of("glm", "deepseek", "kimi", "openai");
 
     private LlmClientFactory() {}
 
@@ -23,7 +33,7 @@ public class LlmClientFactory {
         }
 
         // 轮询所有支持的 provider
-        for (String provider : new String[]{"glm", "deepseek", "kimi", "openai"}) {
+        for (String provider : SUPPORTED_PROVIDERS) {
             client = create(provider, config);
             if (client != null) {
                 return client;
@@ -35,6 +45,9 @@ public class LlmClientFactory {
 
     /**
      * 为指定 provider 创建客户端。
+     *
+     * @param provider provider 名称（glm / deepseek / kimi / openai）
+     * @param config   配置
      * @return 客户端实例，找不到 API Key 时返回 null
      */
     public static LlmClient create(String provider, YukiCliConfig config) {
@@ -48,27 +61,28 @@ public class LlmClientFactory {
 
         String model = config.getModel(normalized);
         String baseUrl = config.getBaseUrl(normalized);
-        if (baseUrl == null || baseUrl.isBlank()) {
-            baseUrl = defaultBaseUrl(normalized);
-        }
-        if (model == null || model.isBlank()) {
-            model = defaultModel(normalized);
-        }
 
-        return new OpenAiCompatibleClient(apiKey, baseUrl, model, normalized);
+        return switch (normalized) {
+            case "glm" -> new GLMClient(apiKey, model, baseUrl);
+            case "deepseek" -> new DeepSeekClient(apiKey, model, baseUrl);
+            case "kimi" -> new KimiClient(apiKey, model, baseUrl);
+            case "openai" -> new OpenAIClient(apiKey, model, baseUrl);
+            default -> new OpenAiCompatibleClient(apiKey, baseUrl, model, normalized);
+        };
     }
 
     /** provider 别名归一 */
-    private static String normalizeProvider(String provider) {
+    public static String normalizeProvider(String provider) {
         String n = provider.trim().toLowerCase();
         return switch (n) {
             case "moonshot", "moonshotai", "moonshot-ai" -> "kimi";
+            case "zhipu", "bigmodel" -> "glm";
             default -> n;
         };
     }
 
     /** 各 provider 的默认 Base URL */
-    private static String defaultBaseUrl(String provider) {
+    public static String defaultBaseUrl(String provider) {
         return switch (provider) {
             case "glm" -> "https://open.bigmodel.cn/api/paas/v4";
             case "deepseek" -> "https://api.deepseek.com/v1";
@@ -79,7 +93,7 @@ public class LlmClientFactory {
     }
 
     /** 各 provider 的默认模型 */
-    private static String defaultModel(String provider) {
+    public static String defaultModel(String provider) {
         return switch (provider) {
             case "glm" -> "glm-4-flash";
             case "deepseek" -> "deepseek-chat";
@@ -87,5 +101,17 @@ public class LlmClientFactory {
             case "openai" -> "gpt-4o";
             default -> "gpt-4o";
         };
+    }
+
+    /** 列出所有已配置 API Key 的可用 provider */
+    public static List<String> listAvailableProviders(YukiCliConfig config) {
+        List<String> available = new ArrayList<>();
+        for (String provider : SUPPORTED_PROVIDERS) {
+            String apiKey = config.getApiKey(provider);
+            if (apiKey != null && !apiKey.isBlank()) {
+                available.add(provider);
+            }
+        }
+        return available;
     }
 }
